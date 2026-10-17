@@ -238,6 +238,7 @@ impl Game<'_> {
         self.spawn = None;
         self.mobs.clear();
         self.clear_remote_objects();
+        self.clear_remote_projectiles();
         self.creatures.projectiles.clear();
         self.dropped.clear();
         self.particles.clear();
@@ -356,6 +357,7 @@ impl Game<'_> {
         self.player = None;
         self.mobs.clear();
         self.clear_remote_objects();
+        self.clear_remote_projectiles();
         self.dropped.clear();
         self.particles.clear();
         self.pickups.clear();
@@ -588,6 +590,7 @@ impl Game<'_> {
             self.world.weather = weather;
             self.mobs.clear();
             self.clear_remote_objects();
+            self.clear_remote_projectiles();
             self.dropped.clear();
             self.particles.clear();
             self.pickups.clear();
@@ -953,11 +956,13 @@ impl Game<'_> {
             }
         }
         self.turn_remote_object(id, rotation.map(|(yaw, _)| yaw), on_ground);
+        self.turn_remote_projectile(id, rotation);
     }
     fn remove_entity(&mut self, id: i32) {
         self.mobs.retain(|m| m.id != id as u32);
         self.dropped.retain(|d| d.id != id as u32);
         self.remove_remote_object(id as u32);
+        self.remove_remote_projectile(id as u32);
         if let Some(r) = self.remote.as_mut() {
             r.entities.remove(&id);
             r.lerps.remove(&id);
@@ -1220,7 +1225,17 @@ impl Game<'_> {
                     }
                 }
                 self.spawn_entity(p.id, &kind, p.position, yaw, head);
-                self.spawn_remote_object(p.id, &kind, p.position, yaw, p.data);
+                if !self.spawn_remote_object(p.id, &kind, p.position, yaw, p.data) {
+                    let pitch = horizon_protocol::buf::unpack_degrees(p.pitch);
+                    self.spawn_remote_projectile(
+                        p.id,
+                        &kind,
+                        p.position,
+                        (yaw, pitch),
+                        p.velocity,
+                        p.data,
+                    );
+                }
             }
             C::RemoveEntities(p) => {
                 for id in p.ids {
@@ -1309,6 +1324,7 @@ impl Game<'_> {
                     }
                 }
                 self.remote_object_data(p.id, &p.values);
+                self.remote_projectile_data(p.id, &p.values);
             }
             // ClientPacketListener.handleSetEquipment: what a mob or another
             // player holds and wears (EquipmentSlot ordinals).
@@ -2327,8 +2343,9 @@ impl Game<'_> {
             }
         }
         if running {
-            // Boats, minecarts and armor stands interpolate like mobs.
-            self.tick_remote_objects(|id, at| match lerps.get_mut(&(id as i32)) {
+            // Boats, minecarts, armor stands, projectiles and the rest
+            // interpolate like mobs.
+            let mut step = |id: u32, at: Vec3| match lerps.get_mut(&(id as i32)) {
                 Some(l) if l.steps > 0 => {
                     let n = f64::from(l.steps);
                     l.steps -= 1;
@@ -2339,7 +2356,9 @@ impl Game<'_> {
                     )
                 }
                 _ => at,
-            });
+            };
+            self.tick_remote_objects(&mut step);
+            self.tick_remote_projectiles(&mut step);
         }
         lerps.retain(|_, l| l.steps > 0);
         if let Some(r) = self.remote.as_mut() {
