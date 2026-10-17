@@ -20,6 +20,8 @@ address. The script then checks, from both sides, what a guest's game used to ge
 - containers: the guest's ender chest holds the guest's items, not the host's, and a double chest
              opens as 9x6 with the right half first;
 - feedback:  the guest's command feedback names the guest and shows the numbers.
+- objects:   boats, minecarts, armor stands, item frames and paintings the host summons reach the
+             guest as the host has them (kind, place, rotation, what they hold or wear, the variant).
 
 Each check is reported on its own (a failing one doesn't stop the others) and the screenshots of
 both sides go to --out (host-*.png, guest-*.png).
@@ -48,7 +50,8 @@ from agent_control_e2e import Cli, Failed, game_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 GUEST_NAME = 'Guest'
-CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'crafting', 'damage', 'mobs', 'hazards', 'pvp', 'containers', 'feedback', 'trials']
+CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'crafting', 'damage', 'mobs', 'hazards', 'pvp', 'containers', 'feedback', 'trials',
+          'objects']
 
 
 class Game:
@@ -622,11 +625,64 @@ def check_trials(host, guest, out):
     return {'spawner': trial, 'vault': active, 'rewarded': uuid(rewarded), 'host': uuid(host_uuid)}
 
 
+def objects_near(game, centre):
+    """`status`'s objects within 8 blocks of centre, without their ids (each side numbers its own)."""
+    out = []
+    for o in game('status')['objects']:
+        if all(abs(o['position'][i] - centre[i]) <= 8 for i in (0, 2)):
+            o = dict(o)
+            o.pop('id')
+            o['position'] = [round(v, 2) for v in o['position']]
+            if 'yaw' in o:  # as the packets carry it, in 256ths of a turn
+                o['yaw'] = round(o['yaw'] * 256 / 360) % 256
+            out.append(o)
+    return sorted(out, key=json.dumps)
+
+
+def check_objects(host, guest, out):
+    x, y, z = (int(v // 1) for v in pos_of(host))
+    commands = [
+        f'fill {x - 6} {y} {z - 6} {x + 6} {y + 3} {z - 6} minecraft:stone',
+        f'summon minecraft:minecart {x - 4.5} {y} {z + 3.5}',
+        f'summon minecraft:chest_minecart {x - 2.5} {y} {z + 3.5}',
+        f'summon minecraft:furnace_minecart {x + 1.5} {y} {z + 3.5}',
+        f'summon minecraft:tnt_minecart {x + 4.5} {y} {z + 3.5}',
+        f'summon minecraft:oak_boat {x - 4.5} {y} {z + 6.5} {{Rotation:[45f,0f]}}',
+        f'summon minecraft:birch_chest_boat {x - 1.5} {y} {z + 6.5}',
+        f'summon minecraft:bamboo_raft {x + 2.5} {y} {z + 6.5}',
+        f'summon minecraft:armor_stand {x - 2.5} {y} {z - 2.5} {{Rotation:[90f,0f]}}',
+        f'summon minecraft:armor_stand {x - 4.5} {y} {z - 2.5} {{ShowArms:1b,Small:1b,NoBasePlate:1b,'
+        'equipment:{head:{id:"minecraft:diamond_helmet",count:1}}}',
+        f'summon minecraft:item_frame {x - 3.5} {y + 1} {z - 4.97} {{block_pos:[I;{x - 4},{y + 1},{z - 5}],Facing:3b,'
+        'Item:{id:"minecraft:diamond",count:1},ItemRotation:3b}',
+        f'summon minecraft:glow_item_frame {x - 1.5} {y + 1} {z - 4.97} {{block_pos:[I;{x - 2},{y + 1},{z - 5}],Facing:3b}}',
+        f'summon minecraft:painting {x + 1.5} {y + 1} {z - 4.97} {{block_pos:[I;{x + 1},{y + 1},{z - 5}],facing:0b,'
+        'variant:"minecraft:kebab"}',
+        f'summon minecraft:painting {x + 4} {y + 1} {z - 4.97} {{block_pos:[I;{x + 4},{y + 1},{z - 5}],facing:0b,'
+        'variant:"minecraft:courbet"}',
+    ]
+    try:
+        for command in commands:
+            host('command', command=command)
+        host.wait(60)
+        guest.raw('look-at', x, y, z - 5)
+        guest.wait(10)
+        guest.shot(out, 'objects')
+        host.shot(out, 'objects')
+        mine, theirs = objects_near(host, (x, y, z)), objects_near(guest, (x, y, z))
+    finally:
+        host('command', command=f'kill @e[type=!minecraft:player,x={x - 8},y={y - 2},z={z - 8},dx=16,dy=8,dz=16]')
+        host('command', command=f'fill {x - 6} {y} {z - 6} {x + 6} {y + 3} {z - 6} minecraft:air')
+    assert len(mine) == len(commands) - 1, f'the host has {len(mine)} objects: {mine}'
+    assert theirs == mine, f'the guest sees {theirs}\nthe host has {mine}'
+    return f'{len(theirs)} objects identical'
+
+
 CHECK_FNS = {'tab': check_tab, 'self': check_self, 'armour': check_armour, 'nametags': check_nametags,
              'chest': check_chest, 'crafting': check_crafting, 'damage': check_damage,
              'mobs': check_mobs, 'hazards': check_hazards, 'pvp': check_pvp,
              'containers': check_containers, 'feedback': check_feedback, 'trials': check_trials,
-             'walls': check_walls}
+             'walls': check_walls, 'objects': check_objects}
 
 
 def run(ctl, out, resources, checks):
